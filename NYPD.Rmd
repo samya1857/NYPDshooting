@@ -1,0 +1,265 @@
+---
+title: "NYPD Shooting Incidents: Vulnerable Locations"
+output: pdf_document
+date: "2025-04-26"
+---
+## Introduction. In this project, we focus on countering shooting incidents within NY. So, we try to identify vulnerable areas where security measures might be more stringently applied.
+
+### About the data: NYPD Shooting Incident Data (Historic) 
+#### (Link: https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic)
+#### List of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year.
+
+#### This is a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year. This data is manually extracted every quarter and reviewed by the Office of Management Analysis and Planning before being posted on the NYPD website. Each record represents a shooting incident in NYC and includes information about the event, the location and time of occurrence. In addition, information related to suspect and victim demographics is also included. This data can be used by the public to explore the nature of shooting/criminal activity. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing packages
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+```
+
+## Importing data
+
+```{r url}
+url_in <- 'https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD'
+nypd <- read.csv(url_in)
+```
+
+## Processing
+
+```{r clean}
+nypd$OCCUR_DATE <- as.Date(nypd$OCCUR_DATE, format = "%m/%d/%Y")
+nypd$dmonth <- month(nypd$OCCUR_DATE)
+nypd$dyear <- year(nypd$OCCUR_DATE)
+nypd_year <- nypd %>% group_by(dyear) %>% summarise(count = n())
+
+nypd <- nypd %>% mutate(dmonth = as.numeric(dmonth)) 
+nypd <- nypd %>% mutate(dyear = as.numeric(dyear)) 
+
+nypd_my <- nypd %>%
+  group_by(dyear, dmonth) %>%
+  summarise(count = n())
+
+nypd_my$smonth <- as.numeric(nypd_my$dmonth)
+nypd_my$syear <- as.character(nypd_my$dyear)
+nypd_my$smonth <- sprintf("%02d", nypd_my$smonth)
+
+nypd_my$ym <- paste(nypd_my$syear, nypd_my$smonth, sep = "-")
+```
+
+### Bias identification: the data might be concluded to be racially biased. To counter the bias, we need to look at other aspects of the data, instead of sticking to the NYPD data. Unfortunately, demographic variables mapped to NYPD precincts is not easily available.
+```{r bias_identification}
+nypd_r <- nypd %>% group_by(PERP_RACE) %>% 
+  summarise(count = n()) %>% ungroup()
+
+nypd_v <- nypd %>% group_by(VIC_RACE) %>% 
+  summarise(count = n()) %>% ungroup()
+
+nypd_r <- nypd_r %>% filter(PERP_RACE != "")
+
+nypd_r %>% ggplot(aes(x = PERP_RACE, y = count))+geom_line()+
+  geom_point()+theme(legend.position="bottom", axis.text.x = element_text(angle = 90)) + 
+  labs(title = "Perpetrator Race", y= NULL)
+```
+
+### We try to look at the data as a whole, plotting yearwise shooting incidents.
+
+```{r year_crime}
+nypd_year %>% ggplot(aes(x = dyear, y = count))+geom_line()+
+  geom_point()+theme(legend.position="bottom", axis.text.x = element_text(angle = 90)) + 
+  labs(title = "Yearwise Shooting Incident", y= NULL)
+```
+
+### Modelling - modelling count on the total employment. This explains that more employment drives down criminal activties. Since demographic data is not available at the police precinct level, we have tried to show that poverty is the main factor highly related with criminal activties.
+
+#### For this, we have used New York city employment statistics. The data is acquired from the link: https://dol.ny.gov/labor-statistics-new-york-city-region
+
+### Modelling Shooting
+
+```{r modelling_shooting}
+url = 'https://dol.ny.gov/statistics-new-york-city-employment-statistics'
+temp_file <- tempfile(fileext = ".xlsx")
+invisible(suppressMessages(download.file(url, temp_file, mode = "wb")))
+df <- suppressMessages(read_excel(temp_file))
+df_trimmed <- df %>%
+  select(1:which(names(df) == "ANNUAL"))
+df_trimmed <- df_trimmed %>% filter(YEAR != 2025)
+df_gr <- df_trimmed %>% group_by(YEAR) %>% 
+  summarise(sum_employees = sum(ANNUAL)) %>% ungroup()
+df_joined <- inner_join(df_gr, nypd_year, by=c("YEAR"="dyear"))
+
+#modelling
+mod <- lm(count ~ sum_employees, data = df_joined)
+
+x_grid <- seq(25000, 35000)
+new_df <- tibble(sum_employees = x_grid)
+df_joined_w <- df_joined %>% mutate(pred = predict(mod))
+
+df_joined_w %>% ggplot() + geom_point(aes(x = sum_employees, y= count), color="blue") + 
+  geom_point(aes(x = sum_employees, y=pred), color = "red")
+```
+
+
+
+### Plotting monthwise crime - exploring seasonality of criminal activities
+```{r month_crime}
+nypd_my <- nypd_my %>%
+  mutate(ym_date = ymd(paste0(ym, "-01")))
+
+nypd_my %>%
+  ggplot(aes(x = ym_date, y = count)) +
+  geom_line() +
+  geom_point() +
+  scale_x_date(
+    date_labels = "%Y-%m",     # Format x-axis as "2020-01", "2021-01" etc.
+    date_breaks = "12 months"  # Only one label every 12 months
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  ) +
+  labs(
+    title = "Monthwise Shooting Incident",
+    x = NULL,
+    y = NULL
+  )
+```
+
+### Looking at the seasonality of data - the data is definitely seasonal. This is an interesting aspect. Shooting incidents increase in Summer, seasonally.
+```{r seasonality}
+nypd_s <- nypd_my %>% filter(dyear<=2008)
+
+nypd_s %>% ggplot(aes(x = ym, y = count))+geom_line()+geom_point() + 
+  theme(legend.position="bottom", axis.text.x = element_text(angle = 90)) + 
+  labs(title = "Monthwise Shooting Incident", x= NULL, y= NULL)
+
+```
+
+### Exploring seasonal crime trends in specific places - in the absence of demographic variables, this can be used as the main indicator of the nature of the crime. My personal bias (based on online reading) is that it should be in bars/pubs. However, the majority of criminal activties take place in multi dwelling public housing, bringing the attention back on multi dimensional poverty as a possible factor for criminal activties. Thus, my personal bias has been countered.
+```{r location_based_crimes}
+nypd <- nypd %>% filter(dyear<2020) #filtering for only pre-covid era
+
+nypd <- nypd %>%
+  filter(!is.na(LOCATION_DESC) & LOCATION_DESC != "" & LOCATION_DESC !="(null)")
+
+nypd_l <- nypd %>%
+  group_by(dmonth, LOCATION_DESC) %>%
+  summarise(count = n()) %>% ungroup()
+
+middle_points <- nypd_l %>%
+  group_by(LOCATION_DESC) %>%
+  arrange(dmonth) %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num == ceiling(max(row_num)/2)) 
+
+# Now plot
+ggplot(nypd_l, aes(x = dmonth, y = count, color = LOCATION_DESC, group = LOCATION_DESC)) +
+  geom_line() +
+  geom_point() +
+  geom_text(
+  data = middle_points,
+  aes(label = LOCATION_DESC),
+  hjust = -0.2,   
+  vjust = 0.5,
+  show.legend = FALSE  
+  )+
+  theme_minimal() +
+  theme(legend.position="none", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(
+    title = "Monthly Counts by Location Type",
+    x = "Month",
+    y = "Total Count",
+    color = "Location Type"
+  )
+```
+
+### Taking normalized values and plotting - let us now check where the maximum variability of crime is present.
+```{r normalized}
+nypd_wide <- nypd_l %>%
+  pivot_wider(
+    names_from = LOCATION_DESC, 
+    values_from = count,    
+    values_fill = 0          
+  )
+
+nypd_widesc <- nypd_wide %>%
+  mutate(across(where(is.numeric), ~ (. - min(.)) / (max(.) - min(.))))
+
+nypd_widescl <- nypd_widesc %>%
+  pivot_longer(
+    cols = -dmonth,            # keep month fixed, make other columns long
+    names_to = "LOCATION_DESC",
+    values_to = "normalized_count"
+  )
+
+middle_points <- nypd_widescl %>%
+  group_by(LOCATION_DESC) %>%
+  arrange(dmonth) %>%
+  mutate(row_num = row_number()) %>%
+  filter(row_num == ceiling(max(row_num)/2))
+
+# Now plot
+ggplot(nypd_widescl, aes(x = dmonth, y = normalized_count, 
+                         color = LOCATION_DESC, group = LOCATION_DESC)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  theme(legend.position="none",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+  ) +
+  labs(
+    title = "Normalized Monthly Counts by Location Type",
+    x = "Month",
+    y = "Normalized Count",
+    color = "LOCATION_DESC"
+  )
+```
+
+### Taking top three places with maximum variation - these three places are public places, which means the seasonality does depend on behavioural factors such as school holidays and rise in temperature (in line with online sources). Seasonal ramping up of security in these places might lead to a drop in shooting incidents.
+```{r max_variation}
+# Calculate SD for each column
+nypd_loc_sds <- nypd_widesc %>%
+  summarise(across(where(is.numeric), \(x) sd(x, na.rm = TRUE))) %>%
+  pivot_longer(
+    everything(),
+    names_to = "LOCATION_DESC",
+    values_to = "sd_value"
+  )
+
+# 2. Take top 3 columns with highest SD
+top_3_sds <- nypd_loc_sds %>%
+  arrange(desc(sd_value)) %>%
+  slice_max(sd_value, n = 3)
+
+nypd_widescl <- nypd_widescl %>% 
+  filter(LOCATION_DESC %in% c('CANDY STORE', 
+                              'CHAIN STORE', 'DEPT STORE', 
+                              'GYM/FITNESS FACILITY'))
+
+# Now plot
+ggplot(nypd_widescl, aes(x = dmonth, y = normalized_count, color = LOCATION_DESC, 
+                         group = LOCATION_DESC)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)
+  ) +
+  labs(
+    title = "Normalized Monthly Counts by Location Type",
+    x = "Month",
+    y = "Normalized Count",
+    color = "LOCATION_DESC"
+  )
+
+```
+
+### Conclusion. In this notebook, we explore solutions to criminal activities, specifically, shooting incidents in New York. We avoid racial discrimination that can be a biased way of looking at the data and instead focus on locations of the crime as a proxy for the causal factors. In the absence of detailed demographic data available at the Police precinct level, we have chosen the location of the crime as an indicator of the nature of shooting incidents within New York. The limited demographic information (race, age, gender) might not be helpful in in deducing causal factors, especially in the absence of economic data. We find multi dwelling public housing as the prime place for incidents, emphasizing poor locations as places of crime, and not any particular ethnic group. 
+
+### Thus, ramping up security measures in multi dwelling public housing can be an effective strategy to counter shooting incidents, as well as providing a safe place for the residents. Chain stores, departmental stores and gyms, that have a seasonal peak, can be focus areas as well to prevent seasonal criminal activties during the summer.
